@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { longMarkdown } from "../../../e2e/perf/longMarkdown";
-import { BlockMarkdown, Markdown } from "./Markdown";
+import { BlockMarkdown, fenceLanguage, Markdown } from "./Markdown";
 import { MARKDOWN_EDGE_FIXTURES } from "./markdownFixtures.test";
 
 function withoutCarriageReturns(html: string) {
@@ -50,5 +50,23 @@ describe("BlockMarkdown", () => {
 		const blocks = renderToStaticMarkup(<BlockMarkdown text={text} components={components} />);
 		expect(blocks).toBe(whole);
 		expect(blocks).toContain("<span>link</span>");
+	});
+});
+
+describe("fenceLanguage", () => {
+	for (const [className, tag] of [
+		["language-c", "c"],
+		["language-c++", "c++"],
+		["language-c#", "c#"],
+		["language-java", "java"],
+		["language-ts:src/a.ts", "ts"],
+		["language-js{1,3}", "js"],
+	] as const) {
+		test(`reads ${className} as ${tag}`, () => {
+			expect(fenceLanguage(className)).toBe(tag);
+		});
+	}
+	test("reads no fence language from a bare block", () => {
+		expect(fenceLanguage(undefined)).toBeUndefined();
 	});
 });
