@@ -19,6 +19,7 @@ import { cn } from "@thinkrail/ui/utils";
 import {
 	forwardRef,
 	type KeyboardEvent,
+	type MouseEvent,
 	useCallback,
 	useEffect,
 	useImperativeHandle,
@@ -52,7 +53,12 @@ import {
 	usePendingSelection,
 	useSlashCommandCompletion,
 } from "./prompt";
-import { imagePasteDropHandlers, PromptImageChips, usePromptImages } from "./promptImages";
+import {
+	imagePasteDropHandlers,
+	PromptImageChips,
+	type PromptImagesOwner,
+	usePromptImages,
+} from "./promptImages";
 import type { ChatAttachment } from "./types";
 
 export type SubmitBehavior = "send" | "steer" | "followUp" | "interrupt";
@@ -81,6 +87,21 @@ const SEND_MAIN = cn(
 );
 const SEND_MORE = cn(SEGMENT, "rounded-r-full pr-8 pl-2");
 const KEYCAP = "flex h-16 min-w-16 items-center justify-center rounded-xs bg-on-primary-soft px-2";
+
+const COMPOSER_CONTROLS =
+	"a,button,input,label,select,textarea,[role='button'],[role='menuitem'],[role='option']";
+
+function isComposerDeadZone(
+	{ button, target }: MouseEvent<HTMLElement>,
+	shell: HTMLElement | null,
+) {
+	return (
+		button === 0 &&
+		target instanceof Element &&
+		shell?.contains(target) === true &&
+		!target.closest(COMPOSER_CONTROLS)
+	);
+}
 
 const STREAMING_SEND_MODES = [
 	{
@@ -149,8 +170,11 @@ function highlightTint(state: SlotHighlightState): string {
 interface ComposerProps {
 	value: string;
 	onChange: (value: string) => void;
+	imageOwner?: PromptImagesOwner;
 	isStreaming: boolean;
+	awaitingResponse: boolean;
 	growthLimit: ComposerGrowthLimit;
+	divider?: boolean;
 	commands: SlashCommandItem[];
 	templatePending: boolean;
 	mentionCandidates: MentionCandidate[];
@@ -181,10 +205,12 @@ interface ComposerProps {
 	 * opens this one instead.
 	 */
 	externalModelPicker?: ModelEffortPickerHandle;
+	dictationEvent?: string;
 }
 
 export interface ComposerHandle {
 	insertText: (text: string) => void;
+	applyEdit: (kind: "replace" | "paste", text: string) => void;
 	insertAndSubmit: (text: string, behavior: SubmitBehavior) => void;
 	insertTemplate: (parsed: ParsedTemplate) => void;
 	restoreAttachments: (attachments: ChatAttachment[]) => void;
@@ -196,8 +222,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	{
 		value,
 		onChange,
+		imageOwner,
 		isStreaming,
+		awaitingResponse,
 		growthLimit,
+		divider = true,
 		commands,
 		templatePending,
 		mentionCandidates,
@@ -219,6 +248,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 		onManageTemplates,
 		templatesEmpty,
 		externalModelPicker,
+		dictationEvent,
 	},
 	handleRef,
 ) {
@@ -226,7 +256,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	const ref = useRef<HTMLTextAreaElement>(null);
 	const pickerRef = useRef<ModelEffortPickerHandle>(null);
 	const [caret, setCaret] = useState(0);
-	const attachedImages = usePromptImages();
+	const attachedImages = usePromptImages(imageOwner);
 	const { images } = attachedImages;
 	const [submitError, setSubmitError] = useState<string | null>(null);
 	const pendingImages = attachedImages.pending;
@@ -242,6 +272,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	const slotIdx = slotSession?.activeIndex ?? 0;
 	const backdropRef = useRef<HTMLDivElement | null>(null);
 	const editorSizerRef = useRef<HTMLDivElement | null>(null);
+	const shellRef = useRef<HTMLDivElement>(null);
 	const [draftNeedsExpansion, setDraftNeedsExpansion] = useState(false);
 	const expanded = isStreaming || draftNeedsExpansion;
 	const syncBackdropScroll = useCallback(() => {
@@ -298,18 +329,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	const focusSelection = usePendingSelection(ref, setCaret);
 
 	const replaceDraft = useCallback(
-		(text: string, caret?: number) => {
+		(text: string, caret?: number, focus = true) => {
+			const selection = caret ?? text.length;
 			recallIdxRef.current = null;
 			setSlotSession(null);
 			setSubmitError(null);
 			onChange(text);
-			focusSelection(caret ?? text.length);
+			if (focus) focusSelection(selection);
+			else setCaret(selection);
 		},
 		[onChange, focusSelection],
 	);
 
+	const [dictating, setDictating] = useState(false);
+	useEffect(() => {
+		const element = ref.current;
+		if (!element || !dictationEvent) return;
+		const onDictation = (event: Event) => {
+			if (event instanceof CustomEvent)
+				setDictating(Reflect.get(Object(event.detail), "listening") === true);
+		};
+		element.addEventListener(dictationEvent, onDictation);
+		return () => element.removeEventListener(dictationEvent, onDictation);
+	}, [dictationEvent]);
+
 	const canSubmit = (raw: string) =>
-		!templatePending && pendingImages === 0 && (!!raw.trim() || images.length > 0);
+		!dictating && !templatePending && pendingImages === 0 && (!!raw.trim() || images.length > 0);
 	const canSend = canSubmit(value);
 
 	const openModelPicker = (query: string) => {
@@ -373,6 +418,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
 	useImperativeHandle(handleRef, () => ({
 		insertText: (text: string) => replaceDraft(text),
+		applyEdit: (kind: "replace" | "paste", text: string) => {
+			const textarea = ref.current;
+			const focused = textarea !== null && textarea === document.activeElement;
+			if (kind === "replace") {
+				replaceDraft(text, text.length, focused);
+				return;
+			}
+			const start = focused ? textarea.selectionStart : value.length;
+			const end = focused ? textarea.selectionEnd : value.length;
+			replaceDraft(
+				`${value.slice(0, start)}${text}${value.slice(end)}`,
+				start + text.length,
+				focused,
+			);
+		},
 		insertAndSubmit: (text: string, behavior: SubmitBehavior) =>
 			canSubmit(text) ? submitText(text, behavior) : replaceDraft(text),
 		insertTemplate: (parsed: ParsedTemplate) => {
@@ -494,11 +554,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	const { onPaste, onDrop } = imagePasteDropHandlers(attachedImages);
 
 	return (
-		<div
+		<fieldset
 			data-testid="chat-composer"
 			data-expanded={expanded}
 			data-streaming={isStreaming}
-			className="relative flex shrink-0 flex-col border-border-muted border-t bg-container-workspace-bg"
+			aria-label={t("chat.composer.label")}
+			onMouseDown={(e) => {
+				if (isComposerDeadZone(e, shellRef.current)) {
+					e.preventDefault();
+					ref.current?.focus();
+				}
+			}}
+			className={cn(
+				"relative m-0 flex min-w-0 shrink-0 flex-col border-0 bg-container-workspace-bg p-0",
+				divider && "border-border-muted border-t",
+			)}
 		>
 			{mentionOpen ? (
 				<div
@@ -573,6 +643,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
 			<div className="p-chat-gutter">
 				<div
+					ref={shellRef}
 					data-testid="chat-composer-shell"
 					className={cn(
 						"relative grid grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] items-end gap-x-4 gap-y-4 overflow-hidden rounded-md border border-control-border-default bg-control-bg bg-clip-padding p-4 transition-colors focus-within:border-control-border-active",
@@ -633,6 +704,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 						<textarea
 							ref={ref}
 							data-testid="chat-input"
+							data-dictation-fallback
 							value={value}
 							onScroll={syncBackdropScroll}
 							onChange={(e) => {
@@ -656,11 +728,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 							onDrop={onDrop}
 							rows={1}
 							placeholder={
-								isStreaming
-									? t("chat.composer.placeholderStreaming")
-									: expanded
-										? t("chat.composer.placeholderExpanded")
-										: t("chat.composer.placeholder")
+								awaitingResponse
+									? t("chat.composer.placeholderQuestion")
+									: isStreaming
+										? t("chat.composer.placeholderStreaming")
+										: expanded
+											? t("chat.composer.placeholderExpanded")
+											: t("chat.composer.placeholder")
 							}
 							className={cn(
 								"absolute inset-0 size-full resize-none overflow-x-hidden overflow-y-auto rounded-sm bg-transparent px-12 py-8 tr-text-ui text-text-default outline-none placeholder:text-text-muted",
@@ -769,6 +843,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 					</div>
 				</div>
 			</div>
-		</div>
+		</fieldset>
 	);
 });
