@@ -24,6 +24,7 @@ import {
 	RiNodeTree,
 	RiSearchEyeLine,
 	RiSettings3Line,
+	RiShapesLine,
 	RiSparkling2Line,
 	RiTerminalBoxLine,
 } from "@remixicon/react";
@@ -43,6 +44,7 @@ const TOOL_LABELS: Record<PaletteTool, MessageKey> = {
 	files: "workbench.tool.files",
 	review: "workbench.tool.review",
 	plan: "workbench.tool.plan",
+	artifacts: "workbench.tool.artifacts",
 };
 
 const TOOL_ICONS: Record<PaletteTool, RemixiconComponentType> = {
@@ -50,6 +52,7 @@ const TOOL_ICONS: Record<PaletteTool, RemixiconComponentType> = {
 	files: RiFolderLine,
 	review: RiFileList3Line,
 	plan: RiListCheck3,
+	artifacts: RiShapesLine,
 };
 
 export interface PaletteCatalogDeps {
